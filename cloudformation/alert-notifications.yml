@@ -1,0 +1,128 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  GlobalNameParameter:
+    Type: 'String'
+    Description: 'A prefix to use for the names of certain resources.'
+
+Outputs:
+  AlertNotificationTopicArn:
+    Description: 'The ARN of the alert notification topic.'
+    Value: !Ref 'AlertNotificationTopic'
+    Export:
+      Name: 'AlertNotificationTopicArn'
+  DispatchAlertNotificationPolicyArn:
+    Description: 'The ARN of the policy that allows dispatching an alert.'
+    Value: !Ref 'DispatchAlertNotificationPolicy'
+    Export:
+      Name: 'DispatchAlertNotificationPolicyArn'
+
+Resources:
+  AlertNotificationConfigurationSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Sub '${GlobalNameParameter}/notification/uri'
+      Description: 'Notification configuration for apprise notifications.'
+      SecretString: 'replaceme'
+      Tags:
+        - Key: 'CI'
+          Value: 'true'
+
+  AlertNotificationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      DisplayName: !Sub '${GlobalNameParameter}-AlertNotification'
+      Tags:
+        - Key: 'CI'
+          Value: 'true'
+
+  DispatchAlertNotificationPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: '/ci/'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'sns:Publish'
+            Resource:
+              - !Sub
+                - 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${TopicName}'
+                - { TopicName: Ref AlertNotificationTopic }
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'AlertNotificationTopic'
+
+  GetNotificationSecretPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: '/ci/'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/${GlobalNameParameter}/notification/*'
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'AlertNotificationTopic'
+
+  AlertNotificationFunctionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: '/ci/'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Effect: 'Allow'
+          Principal:
+            Service:
+              - !Sub 'lambda.${AWS::URLSuffix}'
+          Action:
+            - 'sts:AssumeRole'
+      ManagedPolicyArns:
+       - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+       - !Ref 'GetNotificationSecretPolicy'
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'GetNotificationSecretPolicy'
+
+  AlertNotificationFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: 'notification.lambda_handler'
+      Environment:
+        Variables:
+          GLOBAL_PREFIX: !Ref 'GlobalNameParameter'
+          APPLICATION_NAME: 'notification'
+      Layers:
+        - !ImportValue 'Boto3LambdaLayerArn'
+        - !ImportValue 'AppriseLambdaLayerArn'
+      Role: !GetAtt 'AlertNotificationFunctionRole.Arn'
+      Runtime: 'python3.8'
+      Timeout: 15
+      MemorySize: 128
+      Code:
+        S3Bucket: !ImportValue 'AccountStagingBucketName'
+        S3Key: 'notification-lambda.zip'
+      Tags:
+        - Key: 'CI'
+          Value: 'true'
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'AlertNotificationFunctionRole'
+
+  AlertNotificationSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref 'AlertNotificationTopic'
+      Endpoint: !GetAtt 'AlertNotificationFunction.Arn'
+      Protocol: 'lambda'
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'AlertNotificationFunction'
+      - 'AlertNotificationTopic'

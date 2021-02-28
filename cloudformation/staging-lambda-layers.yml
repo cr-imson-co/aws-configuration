@@ -1,0 +1,41 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Outputs:
+  AppriseLambdaLayerArn:
+    Description: 'The ARN of the apprise Lambda Layer.'
+    Value: !Ref 'AppriseLambdaLayer'
+    Export:
+      Name: 'AppriseLambdaLayerArn'
+  Boto3LambdaLayerArn:
+    Description: 'The ARN of the boto3 Lambda Layer.'
+    Value: !Ref 'Boto3LambdaLayer'
+    Export:
+      Name: 'Boto3LambdaLayerArn'
+
+Resources:
+  AppriseLambdaLayer:
+    Type: 'AWS::Lambda::LayerVersion'
+    Properties:
+      LayerName: 'apprise'
+      Description: 'apprise Lambda Layer for Python 3.8'
+      LicenseInfo: 'MIT'
+      CompatibleRuntimes:
+        - 'python3.8'
+      Content:
+        S3Bucket: !ImportValue 'AccountStagingBucketName'
+        S3Key: 'apprise-lambda-layer.zip'
+    DeletionPolicy: 'Retain'
+
+  Boto3LambdaLayer:
+    Type: 'AWS::Lambda::LayerVersion'
+    Properties:
+      LayerName: 'boto3'
+      Description: 'boto3 Lambda Layer for Python 3.8, also includes aws-xray-sdk and pytz'
+      LicenseInfo: 'MIT'
+      CompatibleRuntimes:
+        - 'python3.8'
+      Content:
+        S3Bucket: !ImportValue 'AccountStagingBucketName'
+        S3Key: 'boto3-lambda-layer.zip'
+    DeletionPolicy: 'Retain'

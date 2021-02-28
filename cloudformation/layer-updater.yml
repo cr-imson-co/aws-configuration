@@ -1,0 +1,190 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  GlobalNameParameter:
+    Type: 'String'
+    Description: 'A prefix to use for the names of certain resources.'
+
+Resources:
+  LambdaLayersBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${GlobalNameParameter}-lambda-layers'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: 'CI'
+          Value: 'true'
+    DeletionPolicy: 'Retain'
+
+  UpdateLambdaLayerPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: '/ci/'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'lambda:PublishLayerVersion'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:layer:*-lambda-layer'
+    DeletionPolicy: 'Delete'
+
+  UpdateFunctionCodePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: '/ci/'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'lambda:UpdateFunctionCode'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:*'
+            Condition:
+              StringEquals:
+                'lambda:ResourceTag/CI': 'true'
+    DeletionPolicy: 'Delete'
+
+  LambdaLayerVersionRatchetingPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: '/ci/'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'lambda:GetFunction'
+              - 'lambda:GetFunctionConfiguration'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:*'
+            Condition:
+              StringEquals:
+                'lambda:ResourceTag/CI': 'true'
+          - Effect: 'Allow'
+            Action:
+              - 'lambda:GetLayerVersion'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:layer:*:*'
+          - Effect: 'Allow'
+            Action:
+              - 'lambda:ListFunctions'
+              - 'lambda:ListLayerVersions'
+            # todo: improve resource descriptor
+            Resource:
+              - '*'
+          - Effect: 'Allow'
+            Action:
+              - 'lambda:UpdateFunctionConfiguration'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:*'
+            Condition:
+              StringEquals:
+                'lambda:ResourceTag/CI': 'true'
+    DeletionPolicy: 'Delete'
+
+  UploadLambdaLayerPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: '/ci/'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObjectAcl'
+              - 's3:GetObject'
+              - 's3:ListBucketMultipartUploads'
+              - 's3:AbortMultipartUpload'
+              - 's3:PutObjectVersionTagging'
+              - 's3:ListBucket'
+              - 's3:PutObjectTagging'
+              - 's3:DeleteObject'
+              - 's3:PutObjectAcl'
+              - 's3:ListMultipartUploadParts'
+            Resource:
+              - !Sub
+                - 'arn:${AWS::Partition}:s3:::${Bucket}'
+                - { Bucket: Ref LambdaLayersBucket }
+              - !Sub
+                - 'arn:${AWS::Partition}:s3:::${Bucket}/*'
+                - { Bucket: Ref LambdaLayersBucket }
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'LambdaLayersBucket'
+
+  TriggerLayerUpdaterFunctionPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: '/ci/'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'lambda:InvokeFunction'
+            Resource:
+              - !Sub
+                - 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${FunctionName}'
+                - { FunctionName: Ref LayerUpdaterFunction }
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'LayerUpdaterFunction'
+
+  LayerUpdaterFunctionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: '/ci/'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Effect: 'Allow'
+          Principal:
+            Service:
+              - !Sub 'lambda.${AWS::URLSuffix}'
+          Action:
+            - 'sts:AssumeRole'
+      ManagedPolicyArns:
+       - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+       - !Ref 'LambdaLayerVersionRatchetingPolicy'
+       - !ImportValue 'DispatchAlertNotificationPolicyArn'
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'LambdaLayerVersionRatchetingPolicy'
+
+  LayerUpdaterFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: 'layer_updater.lambda_handler'
+      Environment:
+        Variables:
+          GLOBAL_PREFIX: !Ref 'GlobalNameParameter'
+          APPLICATION_NAME: 'layer-management'
+          NOTIFICATION_ARN: !ImportValue 'AlertNotificationTopicArn'
+      Layers:
+        - !ImportValue 'Boto3LambdaLayerArn'
+      Role: !GetAtt 'LayerUpdaterFunctionRole.Arn'
+      Runtime: 'python3.8'
+      Timeout: 5
+      MemorySize: 128
+      Code:
+        S3Bucket: !ImportValue 'AccountStagingBucketName'
+        S3Key: 'layer-updater-lambda.zip'
+      Tags:
+        - Key: 'CI'
+          Value: 'true'
+    DeletionPolicy: 'Delete'
+    DependsOn:
+      - 'LayerUpdaterFunctionRole'
